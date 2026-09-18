@@ -101,4 +101,4 @@ Seeing your normal ISP IP under `proxy-unaware` tests is expected when you only 
 
 ## License
 
-[to be decided]
+Released under the [MIT License](LICENSE).
