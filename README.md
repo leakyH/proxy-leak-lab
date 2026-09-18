@@ -1,166 +1,104 @@
 # Proxy Leak Lab
 
-A self-hosted lab for comparing what your server sees through browser HTTP/WebRTC and through a deliberately proxy-aware vs proxy-unaware local client.
+> A self-hosted lab that exposes every channel through which your real IP address can leak past proxies and VPNs — and shows you the IP your server *actually* sees versus the one you *think* you're using.
 
-## What the first version tests
+## Why it exists
 
-- Browser HTTPS request source IP and selected forwarding headers
-- Browser IPv4-only and IPv6-only HTTPS paths
-- Browser WebRTC/STUN server-reflexive candidates
-- HTTP/1.1, HTTP/2, and HTTP/3 at the Caddy edge
-- Raw TCP source IP
-- Raw UDP source IP
-- Direct STUN/XOR-MAPPED source IP
-- GeoIP country code/name for every server-observed public source IP
-- HTTP through `HTTP_PROXY` / `HTTPS_PROXY`
-- HTTP and raw TCP through an explicit SOCKS5 proxy
+Even when you route traffic through an HTTP proxy, a SOCKS5 proxy, or a VPN, your real public IP can still leak through channels that bypass the proxy entirely:
+
+- **WebRTC** — STUN server-reflexive (`srflx`) candidates reveal the NAT's public IP to the peer, regardless of proxy configuration.
+- **Raw TCP / UDP** — applications that open sockets directly (not proxy-aware) send packets straight out to the destination.
+- **DNS** — a resolver that isn't tunneled leaks queries to the recursive server of whoever operates the network.
+- **IPv4 / IPv6 dual-stack** — one address family may route around the tunnel while the other stays inside it.
+- **HTTP forwarding headers** — `X-Forwarded-For` and friends, when a proxy or CDN rewrites them.
+
+Proxy Leak Lab turns each of these channels into an observable probe. Run it against a server you control and you get a side-by-side view of "the IP you intended to expose" versus "the IP the server actually observed".
+
+## What it tests
+
+| Leak channel | Probe |
+|---|---|
+| WebRTC STUN `srflx` | Browser WebRTC / ICE candidates |
+| HTTP source IP + forwarding headers | Browser HTTPS + selected headers |
+| IPv4 / IPv6 dual-stack | `v4.` and `v6.` HTTPS-only paths |
+| HTTP/1.1, HTTP/2, HTTP/3 | Edge (Caddy) protocol visibility |
+| Raw TCP | Direct TCP source IP |
+| Raw UDP | Direct UDP source IP |
+| STUN XOR-MAPPED-ADDRESS | Direct STUN probe |
+| Proxy-aware vs proxy-unaware | Native client: explicit HTTP/SOCKS5 vs plain sockets |
+| Per-IP geolocation | Local GeoLite2 country lookup |
 
 It intentionally does **not** capture cookies, authorization headers, or request bodies.
 
-## DNS records
+## Architecture
 
-Create these records before startup. Do not place a CDN or reverse proxy in front of them for the first test.
-
-| Name | Type | Value |
+| Component | Path | Role |
 |---|---|---|
-| `leak.example.com` | A | server IPv4 |
-| `leak.example.com` | AAAA | server IPv6, if available |
-| `v4.example.com` | A | server IPv4 |
-| `v6.example.com` | AAAA | server IPv6 |
-| `stun.example.com` | A | server IPv4 |
-| `stun.example.com` | AAAA | server IPv6, if available |
+| Server | `server/` | Go HTTP backend plus raw TCP/UDP/STUN listeners; records every observation with local GeoIP; serves the embedded dashboard |
+| Client | `client/` | Go CLI that fires proxy-aware and proxy-unaware probes and prints a color-coded summary |
+| Dashboard | `server/index.html` | Dark card UI for browser tests (HTTP, WebRTC, IPv4/v6) and event inspection |
 
-If the server has no public IPv6, omit the AAAA records; IPv6 tests will correctly fail rather than report an address.
+The server binds its HTTP backend to `127.0.0.1:8080` (a reverse proxy terminates public TLS in front of it) while raw TCP/UDP/STUN listeners bind publicly, because those probe channels must see the client's real source address.
 
-## Server prerequisites
-
-- Ubuntu or another Linux server
-- Docker Engine with Compose plugin
-- Linux host networking (the Compose file uses `network_mode: host` so TCP/UDP peer addresses and IPv6 are not obscured by a container bridge)
-- Public ports:
-  - TCP 80, 443, 9001
-  - UDP 443, 3478, 9002
-- The DNS records above pointed directly at the server
-- A free MaxMind GeoLite2 account ID and license key for local country lookup
-
-Example UFW rules:
-
-```bash
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 443/udp
-sudo ufw allow 9001/tcp
-sudo ufw allow 9002/udp
-sudo ufw allow 3478/udp
-```
-
-## Configure local GeoIP country lookup
-
-The server uses a local `GeoLite2-Country.mmdb` database. It does not send observed IP addresses to a third-party lookup API. Create a free MaxMind GeoLite2 account, generate a license key, then set these values in `.env`:
-
-```dotenv
-MAXMIND_ACCOUNT_ID=your-account-id
-MAXMIND_LICENSE_KEY=your-license-key
-GEOIPUPDATE_FREQUENCY=72
-```
-
-The official `geoipupdate` container downloads `GeoLite2-Country` into a shared read-only volume for the app and checks for updates every 72 hours. The app detects database file changes and invalidates its country cache automatically.
-
-Country results are estimates. Private, loopback, link-local, invalid, unavailable, and unknown addresses are shown with explicit statuses instead of a guessed country.
-
-## Start the server
+## Quick start
 
 ```bash
 cp .env.example .env
-nano .env
-chmod 600 .env
-docker compose build
+# set DASHBOARD_TOKEN (e.g. `openssl rand -hex 24`) and, optionally, MaxMind credentials
 docker compose up -d
-docker compose logs -f geoipupdate app caddy
 ```
 
-The app binds its HTTP backend only to `127.0.0.1:8080`; raw TCP/UDP/STUN listeners bind publicly. Caddy obtains public TLS certificates automatically when DNS points to the server and TCP 80/443 are reachable.
+Open `https://leak.example.com`, paste the `DASHBOARD_TOKEN`, and run the browser tests. Each observed source shows as `IP:port — country (code)`.
 
-Open:
+> Full production deployment — DNS records, firewall/security groups, TLS certificates, systemd service, and nginx — is documented separately in [`docs/DEPLOYMENT_HANDBOOK.md`](docs/DEPLOYMENT_HANDBOOK.md).
 
-```text
-https://leak.example.com
-```
+## Client
 
-Paste the `DASHBOARD_TOKEN` into the page and run the browser tests. Each observed source is displayed as `IP:port — country (code)`. The JSON responses and event log also include `country_code`, `country_name`, `geoip_status`, and `geoip_provider`.
-
-## Build the local client
-
-On any machine with Go 1.23 or newer:
+Build on any machine with Go 1.23+:
 
 ```bash
 go build -o leak-client ./client
 ```
 
-Windows PowerShell:
-
-```powershell
-$env:HTTPS_PROXY = "http://127.0.0.1:7890"   # optional; Go reads proxy environment variables
-.\leak-client.exe -domain example.com
-```
-
-An explicit HTTP proxy is preferable on Windows because this client does not automatically read the Windows GUI proxy setting:
-
-```powershell
-.\leak-client.exe -domain example.com -http-proxy http://127.0.0.1:7890
-```
-
-Explicit SOCKS5:
-
-```powershell
-.\leak-client.exe -domain example.com -socks5 socks5://127.0.0.1:1080
-```
-
-Avoid intentional direct probes:
-
-```powershell
-.\leak-client.exe -domain example.com -socks5 socks5://127.0.0.1:1080 -skip-direct
-```
-
-The client prints one JSON report. Copy its `test_id` into the dashboard field, or open `https://leak.example.com/?test_id=THE_ID`, to view browser and native events under one identifier.
-
-## How to read the two path classes
-
-- `proxy-aware`: the program explicitly uses `HTTP_PROXY` / `HTTPS_PROXY` or the configured SOCKS5 proxy.
-- `proxy-unaware`: the program opens ordinary TCP/UDP sockets. A system-wide TUN/VPN should still route these through the tunnel. An application-only HTTP/SOCKS proxy normally will not.
-
-Seeing your normal ISP IP in `proxy-unaware` tests is expected when you only configured an application proxy. It is a leak only if your intended security claim is that all device traffic should use a full tunnel.
-
-## Check HTTP/3 from a command line
-
-Caddy publishes UDP 443 for HTTP/3. With a curl build that supports HTTP/3:
-
 ```bash
-curl -v --http3-only "https://leak.example.com/api/http?test_id=manual-h3&label=curl-http3"
+./leak-client -domain example.com                          # direct probes
+./leak-client -domain example.com -http-proxy http://127.0.0.1:7890
+./leak-client -domain example.com -socks5 socks5://127.0.0.1:1080
+./leak-client -domain example.com -socks5 socks5://127.0.0.1:1080 -skip-direct
 ```
 
-A failure does not automatically mean a leak; QUIC may be unsupported or blocked. Compare the server's HTTP observation with TCP-based HTTPS.
+The client prints one JSON report. Copy its `test_id` into the dashboard (or open `https://leak.example.com/?test_id=THE_ID`) to view browser and native events under a single identifier.
 
-## Current limitations
+## Reading the results
 
-1. The STUN server logs source IP and returns XOR-MAPPED-ADDRESS, but browser STUN requests do not carry the dashboard `test_id`; correlate them by timestamp and the ICE candidate shown in the page.
-2. SOCKS5 support in the client uses TCP CONNECT. SOCKS5 UDP ASSOCIATE is deliberately not implemented in this first version. The direct UDP test asks whether the operating system/TUN captures UDP that does not know about the proxy.
-3. A true DNS-leak test needs an authoritative DNS server for a delegated test subdomain. The system resolver result printed by this client is not enough to identify the recursive resolver path.
-4. ICMP and traceroute need operating-system privileges/tools and are not included in the cross-platform client.
-5. If you place Cloudflare or another CDN in front of the site, Caddy sees and geolocates the CDN edge rather than your client. First test with DNS pointing directly to the origin.
-6. GeoIP identifies the likely country of an IP prefix, not a person or precise physical location. VPN, mobile, satellite, anycast, and recently reassigned ranges may be inaccurate.
+- **`proxy-aware`** — the client explicitly used `HTTP_PROXY` / `HTTPS_PROXY` or the configured SOCKS5 proxy.
+- **`proxy-unaware`** — the client opened ordinary TCP/UDP sockets. A system-wide TUN/VPN still routes these through the tunnel; an application-only HTTP/SOCKS proxy usually does **not**.
 
-## Security notes
+Seeing your normal ISP IP under `proxy-unaware` tests is expected when you only configured an application proxy — it is a leak only if your threat model requires *all* device traffic to use a full tunnel.
 
-- Set a long `DASHBOARD_TOKEN`.
-- Do not expose the event file over HTTP.
-- The raw probes are rate-limited and bound to fixed echo behavior; they are not general proxies.
-- Rotate or delete the Docker volume containing `/data/events.jsonl` because IP addresses and derived country data are personal data.
-- Keep `.env` mode `0600`; it contains the MaxMind license key and dashboard token.
-- This lab intentionally reveals direct-path addresses to a server you control. Do not run direct tests against infrastructure you do not trust.
+## Limitations
 
-Export the event log when needed:
+1. Browser STUN requests don't carry the dashboard `test_id`; correlate them by timestamp and the ICE candidate shown in the page.
+2. Client SOCKS5 support is TCP CONNECT only (no UDP ASSOCIATE) in this version.
+3. A true DNS-leak test requires an authoritative DNS server for a delegated test subdomain.
+4. ICMP and traceroute need OS privileges and are not included in the cross-platform client.
+5. Behind a CDN, the server sees and geolocates the CDN edge rather than your client — first test with DNS pointing directly at the origin.
+6. GeoIP estimates the country of an IP prefix, not a person or a precise physical location.
 
-```bash
-docker compose exec app cat /data/events.jsonl > events.jsonl
-```
+## Privacy & security
+
+- Captures only IP-level metadata; never cookies, authorization headers, or request bodies.
+- Observed IP addresses and derived country data are personal data — rotate or delete `/data/events.jsonl` and keep `.env` at mode `0600`.
+- Set a long `DASHBOARD_TOKEN`; raw probes are rate-limited and behave as fixed echoes, not general proxies.
+- Only run direct probes against a server you control.
+
+## Documentation
+
+- [`docs/DEPLOYMENT_HANDBOOK.md`](docs/DEPLOYMENT_HANDBOOK.md) — production deployment (DNS, TLS, systemd, nginx, maintenance)
+- [`docs/EXPERIMENT_RESULTS.md`](docs/EXPERIMENT_RESULTS.md) — sample leak experiments and findings
+- [`docs/SERVER_AGENT_DEPLOYMENT_GUIDE_CN.md`](docs/SERVER_AGENT_DEPLOYMENT_GUIDE_CN.md) — server agent deployment guide (中文)
+- [`USAGE.md`](USAGE.md) — usage guide (中文)
+
+## License
+
+[to be decided]
