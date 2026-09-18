@@ -69,17 +69,19 @@
 ### 4.1 为什么不按 Docker Compose 方案
 
 1. **Docker Hub 被墙**：阿里云服务器无法访问 `registry-1.docker.io`，拉不到 `golang` 和 `caddy` 镜像
-2. **预编译二进制 GLIBC 不兼容**：zip 中 `bin/leak-server` 需要 GLIBC 2.34，系统只有 2.32
+2. **预编译二进制 GLIBC 不兼容**：预编译的 `leak-server` 需要 GLIBC 2.34，系统只有 2.32
 3. 方案：用系统 Go 1.25.10 **从源码静态编译**（`CGO_ENABLED=0`），无外部依赖
 
 ### 4.2 编译
 
 ```bash
-# 解压源码
-sudo unzip -q proxy-leak-lab.zip -d /opt/proxy-leak-lab/releases/$(date -u +%Y%m%d-%H%M%S)
+# 获取源码
+release="$(date -u +%Y%m%d-%H%M%S)"
+sudo install -d -m 0750 "/opt/proxy-leak-lab/releases/$release"
+sudo git clone https://github.com/leakyH/proxy-leak-lab.git "/opt/proxy-leak-lab/releases/$release/proxy-leak-lab"
 
 # 编译（静态链接）
-cd /opt/proxy-leak-lab/releases/20260701-132259/proxy-leak-lab
+cd "/opt/proxy-leak-lab/releases/$release/proxy-leak-lab"
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /opt/proxy-leak-lab/leak-server ./server
 ```
 
@@ -139,6 +141,46 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now leak-server
 ```
+
+---
+
+### 4.5 启用 GeoIP 国家查询（可选）
+
+GeoIP 只影响结果页的国家/旗帜显示，不影响核心的 IP 泄露检测；不配置时结果页显示「GeoIP 数据库尚未就绪」。
+
+手动启用步骤：
+
+1. 注册 MaxMind 免费账户，取得 Account ID 与 License Key。
+
+2. 安装 `mmdblookup`（查询本地数据库的 CLI，由 libmaxminddb 包提供）：
+
+```bash
+sudo yum install -y libmaxminddb
+```
+
+3. 安装 `geoipupdate`（MaxMind 官方下载工具），并配置 `/etc/GeoIP.conf`（权限 600）：
+
+```ini
+AccountID <你的 MaxMind 账号 ID>
+LicenseKey <你的 MaxMind License Key>
+EditionIDs GeoLite2-Country
+DatabaseDirectory /usr/share/GeoIP
+```
+
+4. 下载数据库：
+
+```bash
+sudo geoipupdate
+# 生成 /usr/share/GeoIP/GeoLite2-Country.mmdb
+```
+
+5. 重启服务：
+
+```bash
+sudo systemctl restart leak-server
+```
+
+之后结果页显示 `国家名 + 旗帜`。注意 Windows 不渲染 emoji 国旗（只显示国家代码字母），macOS / iOS / Android / Linux 正常显示旗帜。
 
 ---
 
@@ -241,7 +283,7 @@ server {
 预编译的 `leak-client-linux-amd64` 同样有 GLIBC 2.34 问题。从源码编译：
 
 ```bash
-cd /opt/proxy-leak-lab/releases/20260701-132259/proxy-leak-lab
+cd "/opt/proxy-leak-lab/releases/$release/proxy-leak-lab"
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tmp/leak-client ./client
 ```
 
@@ -288,8 +330,9 @@ sudo systemctl reload nginx
 
 # 回滚到旧版本
 ls /opt/proxy-leak-lab/releases/
-# 切换到旧版本：
-# sudo cp /opt/proxy-leak-lab/releases/<old>/proxy-leak-lab/bin/leak-server /opt/proxy-leak-lab/leak-server
+# 切换到旧版本：重新编译旧版本源码，或复制上一版本的编译产物
+# cd /opt/proxy-leak-lab/releases/<old>/proxy-leak-lab
+# CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /opt/proxy-leak-lab/leak-server ./server
 # sudo systemctl restart leak-server
 ```
 
@@ -300,6 +343,6 @@ ls /opt/proxy-leak-lab/releases/
 | 项目 | 说明 |
 |------|------|
 | HTTP/3 (QUIC) | nginx 主线不支持。原项目用 Caddy 发布 UDP 443，当前部署未实现 |
-| GeoIP | 需 MaxMind 账号凭据，当前 `database_unavailable` |
+| GeoIP | 可选功能；当前未启用（`database_unavailable`），启用步骤见 4.5 |
 | v6 域名 | 服务器无公网 IPv6，`v6.example.com` 故意未创建 |
 | STUN 无 test_id | 浏览器 STUN 请求不携带 test_id，靠时间戳+ICE candidate 关联 |
