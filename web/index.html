@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Proxy Leak Lab</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color-scheme: light dark; }
+    body { max-width: 1100px; margin: 32px auto; padding: 0 16px; }
+    button, input { padding: 8px 10px; margin: 4px; }
+    code { overflow-wrap: anywhere; }
+    .card { border: 1px solid #8886; border-radius: 10px; padding: 16px; margin: 14px 0; }
+    .ok { font-weight: 700; }
+    .error { font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 7px; border-bottom: 1px solid #8884; vertical-align: top; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .muted { opacity: .72; }
+  </style>
+</head>
+<body>
+  <h1>Proxy Leak Lab</h1>
+  <p>页面测试 HTTPS、IPv4、IPv6、HTTP/3 可见性和 WebRTC/STUN。服务器观察到的公网 IP 会显示 GeoIP 国家；原始 TCP/UDP 请使用配套客户端。</p>
+
+  <div class="card">
+    <label><b>Test ID</b> <input id="testId" size="40" autocomplete="off"></label>
+    <label>Dashboard token <input id="token" type="password" autocomplete="off"></label>
+    <button id="run">运行浏览器测试</button>
+    <button id="refresh">刷新事件</button>
+    <div class="muted">Token 只保存在当前浏览器 localStorage；不会写入探针请求日志。GeoIP 为数据库估计结果，不代表精确物理位置。</div>
+  </div>
+
+  <div class="card">
+    <h2>浏览器测试结果</h2>
+    <pre id="browserResults">尚未运行</pre>
+  </div>
+
+  <div class="card">
+    <h2>WebRTC ICE candidates</h2>
+    <pre id="iceResults">尚未运行</pre>
+  </div>
+
+  <div class="card">
+    <h2>服务器事件</h2>
+    <table>
+      <thead><tr><th>时间</th><th>类型</th><th>服务器看到的源</th><th>协议/入口</th><th>细节</th></tr></thead>
+      <tbody id="events"></tbody>
+    </table>
+  </div>
+
+<script>
+const testIdInput = document.querySelector('#testId');
+testIdInput.value = new URLSearchParams(location.search).get('test_id') || crypto.randomUUID();
+const currentTestId = () => testIdInput.value.trim();
+const tokenInput = document.querySelector('#token');
+tokenInput.value = localStorage.getItem('proxyLeakLabToken') || '';
+tokenInput.addEventListener('change', () => localStorage.setItem('proxyLeakLabToken', tokenInput.value));
+
+function appendResult(obj) {
+  const el = document.querySelector('#browserResults');
+  const previous = el.textContent === '尚未运行' ? '' : el.textContent + '\n\n';
+  el.textContent = previous + JSON.stringify(obj, null, 2);
+}
+
+async function probe(url, label) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('test_id', currentTestId());
+    u.searchParams.set('label', label);
+    u.searchParams.set('_', Date.now());
+    const response = await fetch(u, { cache: 'no-store', mode: 'cors' });
+    const data = await response.json();
+    appendResult({ label, ok: response.ok, observation: data });
+  } catch (error) {
+    appendResult({ label, ok: false, error: String(error) });
+  }
+}
+
+async function runWebRTC(stunHost, stunPort) {
+  const output = document.querySelector('#iceResults');
+  output.textContent = '';
+  const lines = [];
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: `stun:${stunHost}:${stunPort}` }] });
+  pc.createDataChannel('probe');
+  pc.onicecandidate = (event) => {
+    if (!event.candidate) {
+      output.textContent = lines.length ? lines.join('\n') : '没有返回 candidate；可能被浏览器策略或网络阻止。';
+      pc.close();
+      return;
+    }
+    const c = event.candidate;
+    lines.push(JSON.stringify({
+      candidate: c.candidate,
+      address: c.address,
+      port: c.port,
+      protocol: c.protocol,
+      type: c.type,
+      relatedAddress: c.relatedAddress,
+      relatedPort: c.relatedPort
+    }));
+    output.textContent = lines.join('\n');
+  };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    setTimeout(() => {
+      if (!output.textContent) output.textContent = '等待超时；未收到 ICE candidate。';
+      pc.close();
+    }, 8000);
+  } catch (error) {
+    output.textContent = String(error);
+    pc.close();
+  }
+}
+
+async function runAll() {
+  document.querySelector('#browserResults').textContent = '';
+  document.querySelector('#iceResults').textContent = '';
+  const config = await fetch('/api/config', { cache: 'no-store' }).then(r => r.json());
+  const domain = config.base_domain;
+  appendResult({ label: 'geoip-database', observation: config.geoip });
+  await probe(`${location.origin}/api/http`, 'browser-current-host');
+  if (domain) {
+    await Promise.all([
+      probe(`https://v4.${domain}/api/http`, 'browser-ipv4-only'),
+      probe(`https://v6.${domain}/api/http`, 'browser-ipv6-only')
+    ]);
+    await runWebRTC(`stun.${domain}`, config.stun_port);
+  } else {
+    appendResult({ ok: false, error: 'BASE_DOMAIN 未配置，跳过 v4/v6/STUN。' });
+  }
+  setTimeout(refreshEvents, 1200);
+}
+
+function formatGeo(e) {
+  if (e.geoip_status === 'ok') {
+    return `${e.country_name || e.country_code} (${e.country_code || '?'})`;
+  }
+  const labels = {
+    private: '私网地址',
+    loopback: '环回地址',
+    link_local: '链路本地地址',
+    unspecified: '未指定地址',
+    multicast: '组播地址',
+    invalid_ip: '无效地址',
+    database_unavailable: 'GeoIP 数据库尚未就绪',
+    database_error: 'GeoIP 数据库错误',
+    disabled: 'GeoIP 已禁用',
+    not_found: '国家未知'
+  };
+  return labels[e.geoip_status] || e.geoip_status || '国家未知';
+}
+
+function addCell(tr, text, className = '') {
+  const td = document.createElement('td');
+  if (className) td.className = className;
+  td.textContent = text;
+  tr.appendChild(td);
+  return td;
+}
+
+async function refreshEvents() {
+  const token = tokenInput.value;
+  const url = new URL('/api/events', location.origin);
+  url.searchParams.set('test_id', currentTestId());
+  const body = document.querySelector('#events');
+  try {
+    const headers = token ? { 'X-Lab-Token': token } : {};
+    const response = await fetch(url, { cache: 'no-store', headers });
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const events = await response.json();
+    body.replaceChildren();
+    for (const e of events) {
+      const tr = document.createElement('tr');
+      const details = e.details ? JSON.stringify(e.details) : '';
+      addCell(tr, new Date(e.time).toLocaleString());
+      addCell(tr, e.kind || '');
+      const source = addCell(tr, '');
+      const sourceCode = document.createElement('code');
+      const port = e.source_port ? `:${e.source_port}` : '';
+      sourceCode.textContent = `${e.source_ip || ''}${port} — ${formatGeo(e)}`;
+      source.appendChild(sourceCode);
+      if (e.geoip_provider) {
+        const provider = document.createElement('div');
+        provider.className = 'muted';
+        provider.textContent = e.geoip_provider;
+        source.appendChild(provider);
+      }
+      const protocol = addCell(tr, e.protocol || '');
+      if (e.listener) {
+        const listener = document.createElement('div');
+        listener.className = 'muted';
+        listener.textContent = e.listener;
+        protocol.appendChild(listener);
+      }
+      const detailCell = addCell(tr, '');
+      const detailCode = document.createElement('code');
+      detailCode.textContent = details;
+      detailCell.appendChild(detailCode);
+      body.appendChild(tr);
+    }
+  } catch (error) {
+    body.replaceChildren();
+    const tr = document.createElement('tr');
+    const td = addCell(tr, String(error), 'error');
+    td.colSpan = 5;
+    body.appendChild(tr);
+  }
+}
+
+document.querySelector('#run').addEventListener('click', runAll);
+document.querySelector('#refresh').addEventListener('click', refreshEvents);
+refreshEvents();
+</script>
+</body>
+</html>

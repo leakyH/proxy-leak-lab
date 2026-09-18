@@ -1,0 +1,30 @@
+{
+    http_port 8081
+    https_port 8443
+    email {$ACME_EMAIL}
+    servers {
+        protocols h1 h2 h3
+    }
+}
+
+(leak_proxy) {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Edge-Remote-IP {remote_host}
+        header_up X-Edge-Remote-Port {remote_port}
+        header_up X-Edge-Protocol {http.request.proto}
+        header_up X-Edge-TLS-Version {tls_version}
+        header_up X-Edge-Scheme {scheme}
+    }
+    log {
+        output stdout
+        format json
+    }
+}
+
+leak.{$BASE_DOMAIN}, v4.{$BASE_DOMAIN} {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    import leak_proxy
+}

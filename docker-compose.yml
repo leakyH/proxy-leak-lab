@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      DASHBOARD_TOKEN: ${DASHBOARD_TOKEN:-}
+      HTTP_ADDR: 127.0.0.1:8080
+      TCP_ADDR: :9001
+      UDP_ADDR: :9002
+      STUN_ADDR: :3478
+      DATA_FILE: /data/events.jsonl
+      GEOIP_DB: /usr/share/GeoIP/GeoLite2-Country.mmdb
+      GEOIP_LOOKUP_BIN: /usr/bin/mmdblookup
+    network_mode: host
+    volumes:
+      - lab_data:/data
+      - geoip_data:/usr/share/GeoIP:ro
+
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      CF_API_TOKEN: ${CF_API_TOKEN}
+    network_mode: host
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  lab_data:
+  geoip_data:
+  caddy_data:
+  caddy_config:

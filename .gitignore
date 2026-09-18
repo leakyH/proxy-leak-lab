@@ -1,0 +1,16 @@
+# 敏感配置（含真实密钥，绝不提交）
+.env
+.env.*
+!.env.example
+
+# 编译产物 / 二进制
+bin/
+*.exe
+*.zip
+*checksums*
+
+# 数据（用户隐私，绝不提交）
+data/
+
+# 系统文件
+.DS_Store
