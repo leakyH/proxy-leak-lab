@@ -1,6 +1,6 @@
 # Proxy Leak Lab：服务器端 Agent 部署与验收指令
 
-> 本文档用于交给具有服务器终端权限的 Agent。Agent 应按本文执行，不应仅复述步骤。目标是把 `proxy-leak-lab.zip` 安全部署到一台 Linux 公网服务器，完成 HTTPS、HTTP/3、原始 TCP/UDP、STUN 与本地 GeoIP 国家查询，并提交可核验的部署报告。
+> 本文档用于交给具有服务器终端权限的 Agent。Agent 应按本文执行，不应仅复述步骤。目标是把 Proxy Leak Lab 源码安全部署到一台 Linux 公网服务器，完成 HTTPS、HTTP/3、原始 TCP/UDP、STUN 与本地 GeoIP 国家查询，并提交可核验的部署报告。
 
 ---
 
@@ -24,32 +24,40 @@
 
 ## 2. Agent 应获得的输入
 
-### 2.1 必需文件
+### 2.1 源码获取
 
-首选输入：
+首选方式是从 Git 仓库克隆源码：
 
-```text
-proxy-leak-lab.zip
+```bash
+git clone https://github.com/leakyH/proxy-leak-lab.git
 ```
 
-压缩包内包含：
+仓库结构：
 
 ```text
 proxy-leak-lab/
 ├── server/                 Go 服务端源代码
-├── client/                 Go 本地测试客户端源代码
-├── web/                    浏览器页面
-├── caddy/Caddyfile         HTTPS/HTTP3 入口配置
+│   ├── main.go             服务端入口与 Dashboard 认证
+│   ├── geoip.go            本地 GeoIP 国家查询
+│   ├── geoip_test.go
+│   └── index.html          //go:embed 内嵌的浏览器测试页
+├── client/
+│   └── main.go             Go 本地测试客户端
+├── caddy/
+│   ├── Caddyfile           HTTPS/HTTP3 入口配置
+│   └── Dockerfile
+├── docs/                   部署手册、实验结果、本文档
 ├── docker-compose.yml
 ├── Dockerfile
 ├── .env.example
 ├── go.mod
 ├── Makefile
 ├── README.md
-└── bin/                    预编译二进制
+├── USAGE.md
+└── LICENSE
 ```
 
-部署时应优先使用压缩包中的源代码和 Dockerfile 构建，不要盲目直接执行预编译二进制。
+部署时应优先使用仓库中的源代码通过 Dockerfile 构建，不要执行来源不明的预编译二进制。
 
 ### 2.2 必需配置
 
@@ -152,21 +160,21 @@ docker compose version
 
 如果未安装，只有在得到管理员允许后才能按该发行版的 Docker 官方方式安装 Docker Engine 和 Compose 插件。不要用来历不明的一键脚本。
 
-### 步骤 3：校验输入文件
+### 步骤 3：校验源码
 
-在收到文件的目录执行：
+在克隆得到的源码目录执行：
 
 ```bash
-sha256sum proxy-leak-lab.zip
-unzip -t proxy-leak-lab.zip
+git log -1 --oneline
+git status --porcelain
 ```
 
-当前交付压缩包的 SHA-256 应以随文件提供的最新版 `proxy-leak-lab-checksums.txt` 为准。若校验文件与实际压缩包不一致，停止部署并报告；不要忽略。
+若采用带校验值的文件交付（如源码归档 + SHA-256），以随文件提供的校验值为准；不一致时停止部署并报告，不要忽略。
 
-随后列出内容，确认不存在绝对路径或 `../` 路径穿越：
+随后列出全部跟踪文件，确认结构符合预期、无多余二进制或数据文件：
 
 ```bash
-zipinfo -1 proxy-leak-lab.zip | sed -n '1,200p'
+git ls-files
 ```
 
 ### 步骤 4：检查端口占用
@@ -208,32 +216,14 @@ dig @8.8.8.8 +short A leak.example.com
 - `v6` 只有在服务器确实拥有可用公网 IPv6 时才设置 AAAA。
 - 不得解析到 CDN 地址。
 
-### 步骤 6：解压到新发布目录
+### 步骤 6：部署源码到新发布目录
 
 ```bash
 release="$(date -u +%Y%m%d-%H%M%S)"
 sudo install -d -m 0750 "/opt/proxy-leak-lab/releases/$release"
-sudo unzip -q proxy-leak-lab.zip -d "/opt/proxy-leak-lab/releases/$release"
+sudo git clone https://github.com/leakyH/proxy-leak-lab.git "/opt/proxy-leak-lab/releases/$release/proxy-leak-lab"
 cd "/opt/proxy-leak-lab/releases/$release/proxy-leak-lab"
 ```
-
-在运行前检查核心配置：
-
-```bash
-sed -n '1,240p' docker-compose.yml
-sed -n '1,240p' Dockerfile
-sed -n '1,240p' caddy/Caddyfile
-sed -n '1,240p' .env.example
-```
-
-重点确认：
-
-- `app` 使用 `network_mode: host`。
-- HTTP 后端为 `127.0.0.1:8080`。
-- TCP/UDP/STUN 分别为 `9001/9002/3478`。
-- GeoIP 数据库通过只读卷挂载到应用。
-- Caddy 仅反向代理到 `127.0.0.1:8080`。
-- Caddy 开启 `h1 h2 h3`。
 
 ### 步骤 7：创建安全的 `.env`
 
@@ -399,7 +389,7 @@ sudo ss -lunp | grep ':443\b'
 
 ### 步骤 16：原始 TCP/UDP/STUN 验证
 
-优先使用压缩包中的 Linux 客户端从另一台机器执行：
+优先使用从源码构建的 Linux 客户端从另一台机器执行：
 
 ```bash
 chmod +x leak-client-linux-amd64
@@ -609,11 +599,11 @@ curl -6 https://ifconfig.co/ip
 
 ### 升级
 
-每次新压缩包都解压到新的时间戳目录，不应覆盖当前版本：
+每次升级都把新版本源码部署到新的时间戳目录，不应覆盖当前版本：
 
 ```bash
 release="$(date -u +%Y%m%d-%H%M%S)"
-# 解压、创建 .env、docker compose config --quiet、build、up、验收
+# 克隆、创建 .env、docker compose config --quiet、build、up、验收
 sudo ln -sfn "/opt/proxy-leak-lab/releases/$release" /opt/proxy-leak-lab/current
 ```
 
@@ -663,7 +653,7 @@ docker compose down -v
 ## 11. 可直接粘贴给服务器 Agent 的任务指令
 
 ```text
-请部署我提供的 proxy-leak-lab.zip。先完整阅读同目录中的 SERVER_AGENT_DEPLOYMENT_GUIDE_CN.md，然后实际执行其中的预检查、校验、版本化解压、.env 安全配置、Docker Compose 构建启动和端到端验收。优先从源代码通过 Dockerfile 构建，不要盲目执行压缩包内的预编译服务端二进制。
+请部署 Proxy Leak Lab 源码（git clone https://github.com/leakyH/proxy-leak-lab.git）。先完整阅读同目录中的 SERVER_AGENT_DEPLOYMENT_GUIDE_CN.md，然后实际执行其中的预检查、校验、版本化部署、.env 安全配置、Docker Compose 构建启动和端到端验收。优先从源代码通过 Dockerfile 构建，不要盲目执行来源不明的预编译服务端二进制。
 
 必须保证：
 1. 首轮测试域名直接解析到源服务器，不经过 CDN；
